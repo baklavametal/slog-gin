@@ -38,3 +38,5 @@ require (
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/samber/slog-gin => github.com/baklavametal/slog-gin main
