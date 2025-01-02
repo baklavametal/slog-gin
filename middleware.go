@@ -20,7 +20,7 @@ const (
 var (
 	TraceIDKey   = "trace_id"
 	SpanIDKey    = "span_id"
-	RequestIDKey = "id"
+	RequestIDKey = "req_id"
 
 	RequestBodyMaxSize  = 64 * 1024 // 64KB
 	ResponseBodyMaxSize = 64 * 1024 // 64KB
@@ -55,7 +55,13 @@ type Config struct {
 	WithSpanID         bool
 	WithTraceID        bool
 
+	WithRequestIDInCtx bool
+	WithSpanIDInCtx    bool
+	WithTraceIDInCtx   bool
+
 	Filters []Filter
+
+	PassToCtx bool
 }
 
 // New returns a gin.HandlerFunc (middleware) that logs requests using slog.
@@ -77,7 +83,13 @@ func New(logger *slog.Logger) gin.HandlerFunc {
 		WithSpanID:         false,
 		WithTraceID:        false,
 
+		WithRequestIDInCtx: false,
+		WithSpanIDInCtx:    false,
+		WithTraceIDInCtx:   false,
+
 		Filters: []Filter{},
+
+		PassToCtx: false,
 	})
 }
 
@@ -99,6 +111,12 @@ func NewWithFilters(logger *slog.Logger, filters ...Filter) gin.HandlerFunc {
 		WithResponseHeader: false,
 		WithSpanID:         false,
 		WithTraceID:        false,
+
+		WithRequestIDInCtx: false,
+		WithSpanIDInCtx:    false,
+		WithTraceIDInCtx:   false,
+
+		PassToCtx: false,
 
 		Filters: filters,
 	})
@@ -133,17 +151,12 @@ func NewWithConfig(logger *slog.Logger, config Config) gin.HandlerFunc {
 		bw := newBodyWriter(c.Writer, ResponseBodyMaxSize, config.WithResponseBody)
 		c.Writer = bw
 
-		c.Next()
-
-		status := c.Writer.Status()
 		method := c.Request.Method
 		host := c.Request.Host
 		route := c.FullPath()
-		end := time.Now()
-		latency := end.Sub(start)
-		userAgent := c.Request.UserAgent()
 		ip := c.ClientIP()
 		referer := c.Request.Referer()
+		userAgent := c.Request.UserAgent()
 
 		baseAttributes := []slog.Attr{}
 
@@ -158,13 +171,6 @@ func NewWithConfig(logger *slog.Logger, config Config) gin.HandlerFunc {
 			slog.String("ip", ip),
 			slog.String("referer", referer),
 		}
-
-		responseAttributes := []slog.Attr{
-			slog.Time("time", end.UTC()),
-			slog.Duration("latency", latency),
-			slog.Int("status", status),
-		}
-
 		if config.WithRequestID {
 			baseAttributes = append(baseAttributes, slog.String(RequestIDKey, requestID))
 		}
@@ -196,6 +202,41 @@ func NewWithConfig(logger *slog.Logger, config Config) gin.HandlerFunc {
 			requestAttributes = append(requestAttributes, slog.String("user-agent", userAgent))
 		}
 
+		attributes := append(
+			[]slog.Attr{
+				{
+					Key:   "request",
+					Value: slog.GroupValue(requestAttributes...),
+				},
+			},
+			baseAttributes...,
+		)
+
+		level := config.DefaultLevel
+		msg := "Incoming request"
+
+		logger.LogAttrs(c.Request.Context(), level, msg, attributes...)
+
+		if config.PassToCtx {
+			if config.WithRequestIDInCtx {
+				logger = logger.With(slog.String(RequestIDKey, requestID))
+			}
+
+			c.Set("chunk-logger", logger)
+		}
+
+		c.Next()
+
+		status := c.Writer.Status()
+		end := time.Now()
+		latency := end.Sub(start)
+
+		responseAttributes := []slog.Attr{
+			slog.Time("time", end.UTC()),
+			slog.Duration("latency", latency),
+			slog.Int("status", status),
+		}
+
 		// response body
 		responseAttributes = append(responseAttributes, slog.Int("length", bw.bytes))
 		if config.WithResponseBody {
@@ -216,12 +257,8 @@ func NewWithConfig(logger *slog.Logger, config Config) gin.HandlerFunc {
 			responseAttributes = append(responseAttributes, slog.Group("header", kv...))
 		}
 
-		attributes := append(
+		attributes = append(
 			[]slog.Attr{
-				{
-					Key:   "request",
-					Value: slog.GroupValue(requestAttributes...),
-				},
 				{
 					Key:   "response",
 					Value: slog.GroupValue(responseAttributes...),
@@ -244,8 +281,8 @@ func NewWithConfig(logger *slog.Logger, config Config) gin.HandlerFunc {
 			}
 		}
 
-		level := config.DefaultLevel
-		msg := "Incoming request"
+		level = config.DefaultLevel
+		msg = "Request completed"
 		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
 			level = config.ClientErrorLevel
 			msg = c.Errors.String()
